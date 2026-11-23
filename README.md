@@ -1,0 +1,38 @@
+# Private extension synchronization
+
+매시간 17분에 공개된 두 확장 목록을 확인하고 GitLab 비공개 저장소에 통합합니다.
+이 공개 저장소에는 동기화 코드만 저장합니다. 확장 목록·JS·개인 키·인증키는 올리지 않습니다.
+
+## 동작
+
+- 기존 사용자 확장(드라마둔얌 등)은 보존합니다. 사용자 확장과 원본 ID가 겹치면 중단합니다.
+- main/extra의 JS 경로를 구분하고 GitLab Raw API 주소로 연결합니다.
+- 목록 전체와 모든 JS 다운로드·문법 검사가 성공해야 갱신합니다. 원본 JS는 실행하지 않습니다.
+- 기존 버전과 같아도 JS/설정이 바뀌면 네 번째 버전 숫자를 올려 앱에서 업데이트를 감지합니다.
+- 원본 버전이 낮아지거나 목록이 비어 있거나 파일이 누락되면 기존 정상 커밋을 유지합니다.
+- 사용자 수정본은 자동 관리 경로 `upstream/` 밖에 별도 ID로 추가합니다.
+- 아이콘은 앱의 인증 없는 이미지 로더와 호환되도록 기존 공개 원본 주소를 유지합니다.
+- 공개 로그에는 수량과 성공 여부만 출력하며 비공개 파일·차이·원격 오류 본문을 출력하지 않습니다.
+- 결과는 GitLab에만 커밋합니다. GitHub에 비공개 자료나 실행 산출물을 업로드하지 않습니다.
+
+## 설정
+
+- 공개 GitHub 저장소: `didthddl95/reader-extension-sync`
+- Actions Secret `GITLAB_SYNC_SSH_KEY`: 대상 GitLab 프로젝트에만 등록한 쓰기용 SSH 배포 키
+- Actions Variable `GITLAB_PROJECT_ID`: 대상 프로젝트 숫자 ID
+- Actions Variable `GITLAB_PROJECT_PATH`: 대상 `owner/repository`
+- 대상 main 보호 규칙에 해당 배포 키의 push를 허용합니다. 기존 보호 규칙은 유지합니다.
+- 기본 Linux 표준 실행기를 사용합니다. 예약 실행은 지연될 수 있습니다.
+- 공개 저장소가 60일간 비활성 상태면 GitHub가 예약을 중지할 수 있습니다.
+  결과를 GitLab에만 저장하므로 GitHub의 예약 상태를 주기적으로 확인하고 필요 시 다시 활성화하세요.
+- 앱의 GitLab 읽기용 키는 별도입니다. 자동화용 쓰기 키를 앱에 입력하지 마세요.
+
+## 검증
+
+```sh
+python3 -m unittest -v
+python3 sync.py /path/to/private-checkout --project PROJECT_ID
+```
+
+기본 명령은 검증만 수행합니다. `--apply`는 로컬 checkout만 변경합니다.
+원격 저장소로 보내는 작업은 워크플로가 담당합니다. 강제 push는 사용하지 않습니다.
