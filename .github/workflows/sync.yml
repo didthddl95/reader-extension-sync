@@ -1,0 +1,57 @@
+name: Sync private extensions
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: private-extension-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    if: github.repository == 'didthddl95/reader-extension-sync' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Validate synchronizer
+        run: python3 -m unittest -v
+      - name: Synchronize to private GitLab
+        env:
+          DEPLOY_KEY: ${{ secrets.GITLAB_SYNC_SSH_KEY }}
+          TARGET_PROJECT: ${{ vars.GITLAB_PROJECT_ID }}
+          TARGET_PATH: ${{ vars.GITLAB_PROJECT_PATH }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          task_dir=$(mktemp -d)
+          trap 'rm -rf "$task_dir"' EXIT
+          test -n "$DEPLOY_KEY"
+          [[ "$TARGET_PROJECT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$TARGET_PATH" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          printf '%s\n' "$DEPLOY_KEY" > "$task_dir/key"
+          unset DEPLOY_KEY
+          printf '%s\n' 'gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf' > "$task_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $task_dir/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$task_dir/known_hosts -o BatchMode=yes -o LogLevel=ERROR"
+          if ! git clone --quiet --depth 1 --branch main "git@gitlab.com:$TARGET_PATH.git" "$task_dir/private" 2>"$task_dir/error"; then
+            echo 'Private checkout failed. Check deploy key access.'
+            exit 1
+          fi
+          python3 sync.py "$task_dir/private" --project "$TARGET_PROJECT" --apply
+          git -C "$task_dir/private" config user.name 'Extension Sync'
+          git -C "$task_dir/private" config user.email 'extension-sync@users.noreply.github.com'
+          git -C "$task_dir/private" add -- index.json upstream .extension-sync.json
+          if git -C "$task_dir/private" diff --cached --quiet; then
+            echo 'No changes.'
+            exit 0
+          fi
+          git -C "$task_dir/private" -c core.hooksPath=/dev/null commit --quiet -m 'Sync upstream extensions [skip ci]'
+          if ! git -C "$task_dir/private" push --quiet origin HEAD:main 2>"$task_dir/error"; then
+            echo 'Push rejected. No force push attempted; next run will retry from current main.'
+            exit 1
+          fi
+          echo 'Private repository updated.'
