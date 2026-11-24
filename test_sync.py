@@ -57,7 +57,7 @@ class SyncTests(unittest.TestCase):
         self.assertEqual((self.root / 'index.json').read_bytes(), before)
         self.assertFalse((self.root / 'upstream').exists())
 
-    def test_duplicate_upstream_ids_and_all_empty_feeds_rejected(self):
+    def test_duplicate_upstream_ids_rejected_and_all_empty_feeds_keep_last_sources(self):
         original = self.data[sync.FEEDS[1]]
         self.data[sync.FEEDS[1]] = self.data[sync.FEEDS[0]]
         with self.assertRaises(ValueError):
@@ -65,8 +65,9 @@ class SyncTests(unittest.TestCase):
         self.data[sync.FEEDS[1]] = original
         self.data[sync.FEEDS[0]] = sync.encoded([])
         self.data[sync.FEEDS[1]] = sync.encoded([])
-        with self.assertRaises(ValueError):
-            self.plan()
+        files, deletes, *_ = self.plan()
+        self.assertEqual(json.loads(files['index.json']), [self.custom])
+        self.assertFalse(deletes)
 
     def test_custom_collision_keeps_custom_and_allocates_stable_local_identity(self):
         self.data[sync.FEEDS[0]] = sync.encoded([dict(self.row, id=99)])
@@ -79,12 +80,13 @@ class SyncTests(unittest.TestCase):
         self.assertIn(str(mapped).encode(), files['upstream/manga/a.js'])
         sync.apply(self.root, files, deletes)
         self.assertEqual(self.plan()[0], files)
-        # Removal drops only the managed entry/file, not its identity history.
+        # Removal retains both the listing and its executable code.
         self.data[sync.FEEDS[0]] = sync.encoded([])
         removed, deletes, *_ = self.plan()
         self.assertEqual(json.loads(removed['index.json'])[0], self.custom)
-        self.assertNotIn(mapped, [r['id'] for r in json.loads(removed['index.json'])])
-        self.assertIn('upstream/manga/a.js', deletes)
+        self.assertIn(mapped, [r['id'] for r in json.loads(removed['index.json'])])
+        self.assertEqual(removed['upstream/manga/a.js'], files['upstream/manga/a.js'])
+        self.assertFalse(deletes)
         sync.apply(self.root, removed, deletes)
         self.data[sync.FEEDS[0]] = sync.encoded([dict(self.row, id=99)])
         returned, *_ = self.plan()
@@ -146,13 +148,49 @@ const source = new MProvider();
         with self.assertRaises(ValueError):
             sync.apply(self.root, {'../escape': b'bad'}, set())
 
-    def test_only_managed_removed_files_deleted(self):
+    def test_removed_sources_keep_their_last_listing_and_js(self):
         files, deletes, *_ = self.plan()
         sync.apply(self.root, files, deletes)
         self.data[sync.FEEDS[1]] = sync.encoded([dict(self.row, id=3)])
         files, deletes, *_ = self.plan()
-        self.assertEqual(deletes, {'upstream/extra/manga/a.js'})
+        self.assertFalse(deletes)
+        self.assertEqual(files['upstream/extra/manga/a.js'], b'const a = 2;')
+        self.assertEqual({r['id'] for r in json.loads(files['index.json'])}, {99, 1, 2, 3})
         self.assertEqual(json.loads(files['index.json'])[0], self.custom)
+
+    def test_all_sources_removed_stay_installable_across_repeated_runs(self):
+        files, deletes, *_ = self.plan()
+        sync.apply(self.root, files, deletes)
+        self.data[sync.FEEDS[0]] = sync.encoded([])
+        self.data[sync.FEEDS[1]] = sync.encoded([])
+        kept, deletes, active, custom = self.plan()
+        self.assertEqual((active, custom), (0, 1))
+        self.assertFalse(deletes)
+        self.assertEqual(kept['index.json'], files['index.json'])
+        self.assertEqual(kept['upstream/manga/a.js'], files['upstream/manga/a.js'])
+        sync.apply(self.root, kept, deletes)
+        self.assertEqual(self.plan()[0], kept)
+
+    def test_removing_one_shared_adapter_keeps_its_old_code_while_sibling_updates(self):
+        sibling = dict(self.row, id=2)
+        self.data[sync.FEEDS[1]] = sync.encoded([sibling])
+        files, deletes, *_ = self.plan()
+        sync.apply(self.root, files, deletes)
+        self.data[sync.FEEDS[1]] = sync.encoded([])
+        self.data[self.row['sourceCodeUrl']] = b'const a = 99;'
+        updated, deletes, *_ = self.plan()
+        self.assertEqual(updated['upstream/manga/a.js'], b'const a = 99;')
+        self.assertEqual(updated['upstream/retained/2.js'], b'const a = 1;')
+        retained = next(r for r in json.loads(updated['index.json']) if r['id']==2)
+        self.assertEqual(retained['sourceCodeUrl'], sync.raw_url('42','upstream/retained/2.js'))
+        sync.apply(self.root, updated, deletes)
+        self.assertEqual(self.plan()[0], updated)
+        self.data[sync.FEEDS[1]] = sync.encoded([sibling])
+        returned, deletes, *_ = self.plan()
+        restored = next(r for r in json.loads(returned['index.json']) if r['id']==2)
+        self.assertEqual(restored['sourceCodeUrl'], sync.raw_url('42','upstream/manga/a.js'))
+        self.assertGreater(sync.version_key(restored['version']), sync.version_key(retained['version']))
+        self.assertIn('upstream/retained/2.js', deletes)
 
 
 if __name__ == '__main__':

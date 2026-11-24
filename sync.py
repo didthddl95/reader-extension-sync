@@ -105,7 +105,7 @@ def plan(root, project, fetch=download, validate_js=True):
         raise ValueError('Invalid destination index')
     custom = [row for row in current if str(row['id']) not in managed]
     custom_ids = {row['id'] for row in custom}
-    # Keep identities and versions of removed sources, but never list them.
+    # Keep source identities and version history across upstream removals.
     identities = dict(previous.get('id_map', {sid: int(sid) for sid in managed}))
     history = dict(previous.get('retired_entries', {}))
     history.update(managed)
@@ -129,8 +129,6 @@ def plan(root, project, fetch=download, validate_js=True):
             seen.add(sid)
             version_key(source['version'])
             upstream.append(source)
-    if not upstream:
-        raise ValueError('All upstream indexes empty; previous repository retained')
     occupied = custom_ids | {r['id'] for r in upstream} | set(identities.values())
     next_id = 8_000_000_000
     for source in upstream:
@@ -175,6 +173,35 @@ def plan(root, project, fetch=download, validate_js=True):
         entries[str(local_id)] = {'upstream_id': source['id'],
                                  'upstream_version': source['version'],
                                  'effective_version': effective, 'digest': content_hash}
+    # Preserve each removed source's last listing and executable bytes. If an
+    # active sibling now uses newer code at the same URL, snapshot the old code
+    # separately rather than silently changing the retained adapter.
+    for existing in current:
+        local_id = str(existing['id'])
+        if local_id not in managed or local_id in entries:
+            continue
+        prefix = f'https://gitlab.com/api/v4/projects/{project}/repository/files/'
+        url = existing.get('sourceCodeUrl', '')
+        if not url.startswith(prefix):
+            raise ValueError('Invalid retained asset URL')
+        path = unquote(urlsplit(url).path.split('/repository/files/', 1)[1].removesuffix('/raw'))
+        if (path not in previous['files'] or not path.startswith('upstream/') or
+                not path.endswith('.js') or '..' in path.split('/') or
+                raw_url(project, path) != url):
+            raise ValueError('Invalid retained asset path')
+        stored = (root / path).resolve()
+        if not stored.is_relative_to(root.resolve()):
+            raise ValueError('Retained asset escapes checkout')
+        code = stored.read_bytes()
+        target = path
+        if target in assets and assets[target] != code:
+            target = f'upstream/retained/{local_id}.js'
+            if target in assets and assets[target] != code:
+                raise ValueError('Retained asset path collision')
+        assets[target] = code
+        row = dict(existing, sourceCodeUrl=raw_url(project, target))
+        rows.append(row)
+        entries[local_id] = dict(managed[local_id], retained=True)
     if validate_js:
         with tempfile.TemporaryDirectory() as tmp:
             for n, data in enumerate(assets.values()):
@@ -185,13 +212,13 @@ def plan(root, project, fetch=download, validate_js=True):
                     raise ValueError('JavaScript syntax validation failed')
     result = dict(assets)
     result['index.json'] = encoded(custom + rows)
-    result[MANIFEST] = encoded({'schema': 2, 'entries': entries, 'files': sorted(assets),
+    result[MANIFEST] = encoded({'schema': 3, 'entries': entries, 'files': sorted(assets),
                                'id_map': identities,
                                'retired_entries': {k: v for k, v in history.items() if k not in entries}})
     deletes = set(previous['files']) - set(assets)
     if any(not p.startswith('upstream/') or '..' in p.split('/') for p in deletes):
         raise ValueError('Invalid previous manifest path')
-    return result, deletes, len(rows), len(custom)
+    return result, deletes, len(upstream), len(custom)
 
 
 def apply(root, files, deletes):
@@ -218,7 +245,8 @@ def main():
                   for p, data in files.items()) + len(deletes)
     if args.apply:
         apply(args.checkout, files, deletes)
-    print(f'Validated {count} upstream entries; preserved {custom} custom entries; {changed} changed files.')
+    retained = sum(bool(v.get('retained')) for v in json.loads(files[MANIFEST])['entries'].values())
+    print(f'Validated {count} upstream entries; preserved {custom} custom and {retained} retained entries; {changed} changed files.')
 
 
 if __name__ == '__main__':
