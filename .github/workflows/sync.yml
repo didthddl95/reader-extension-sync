@@ -1,7 +1,15 @@
 name: Sync private extensions
 on:
   schedule:
-    - cron: '17 * * * *'
+    # More than one opportunity per hour if GitHub delays/drops a scheduled run.
+    # Changing cron also renews the schedule actor; timings are still best effort.
+    - cron: '11,26,41,56 * * * *'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sync.yml'
+      - 'sync.py'
+      - 'test_sync.py'
   workflow_dispatch:
 permissions:
   contents: read
