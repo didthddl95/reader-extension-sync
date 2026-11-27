@@ -193,5 +193,52 @@ const source = new MProvider();
         self.assertIn('upstream/retained/2.js', deletes)
 
 
+class OverrideTests(unittest.TestCase):
+    setUp = SyncTests.setUp
+    plan = SyncTests.plan
+    def configure(self, patch=b'// local patch\n'):
+        (self.root / 'custom').mkdir(exist_ok=True)
+        (self.root / 'custom/override.js').write_bytes(patch)
+        (self.root / '.extension-overrides.json').write_bytes(sync.encoded({
+            'schema': 1, 'sources': {'1': 'custom/override.js'}}))
+
+    def test_override_is_versioned_idempotent_and_survives_upstream_update(self):
+        self.configure()
+        files, deletes, *_ = self.plan()
+        self.assertTrue(files['upstream/manga/a.js'].endswith(b'// local patch\n'))
+        self.assertEqual(json.loads(files['index.json'])[1]['version'], '1.0.0.1')
+        sync.apply(self.root, files, deletes)
+        self.assertEqual(self.plan()[0], files)
+        self.data[self.row['sourceCodeUrl']] = b'const a = 300;'
+        updated, deletes, *_ = self.plan()
+        self.assertIn(b'const a = 300;', updated['upstream/manga/a.js'])
+        self.assertTrue(updated['upstream/manga/a.js'].endswith(b'// local patch\n'))
+        self.assertEqual(json.loads(updated['index.json'])[1]['version'], '1.0.0.2')
+        sync.apply(self.root, updated, deletes)
+        self.configure(b'// changed patch\n')
+        changed, *_ = self.plan()
+        self.assertEqual(json.loads(changed['index.json'])[1]['version'], '1.0.0.3')
+
+    def test_invalid_override_fails_without_writing_checkout(self):
+        before = (self.root / 'index.json').read_bytes()
+        self.configure(b'const = {')
+        with self.assertRaises(ValueError): self.plan()
+        self.assertEqual((self.root / 'index.json').read_bytes(), before)
+
+    def test_override_cannot_escape_custom_or_checkout(self):
+        self.configure()
+        for rel in ['../outside.js', 'upstream/a.js', '/tmp/outside.js', 'custom/../a.js']:
+            (self.root / '.extension-overrides.json').write_bytes(sync.encoded({
+                'schema': 1, 'sources': {'1': rel}}))
+            with self.assertRaises(ValueError): self.plan()
+        with tempfile.TemporaryDirectory() as elsewhere:
+            outside = Path(elsewhere) / 'outside.js'
+            outside.write_text('// outside')
+            (self.root / 'custom/link.js').symlink_to(outside)
+            (self.root / '.extension-overrides.json').write_bytes(sync.encoded({
+                'schema': 1, 'sources': {'1': 'custom/link.js'}}))
+            with self.assertRaises(ValueError): self.plan()
+
 if __name__ == '__main__':
     unittest.main()
+

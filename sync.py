@@ -97,6 +97,29 @@ def source_identity_bridge(remaps):
 ''').encode()
 
 
+def local_overrides(root):
+    manifest = root / '.extension-overrides.json'
+    if not manifest.exists():
+        return {}
+    config = json.loads(manifest.read_text())
+    if config.get('schema') != 1 or not isinstance(config.get('sources'), dict):
+        raise ValueError('Invalid local override manifest')
+    overrides = {}
+    for sid, rel in config['sources'].items():
+        if (not re.fullmatch(r'[1-9][0-9]*', sid) or not isinstance(rel, str) or
+                not rel.startswith('custom/') or not rel.endswith('.js') or
+                '..' in rel.split('/')):
+            raise ValueError('Invalid local override path')
+        path = (root / rel).resolve()
+        if not path.is_relative_to(root.resolve()):
+            raise ValueError('Local override escapes checkout')
+        data = path.read_bytes()
+        if not data or len(data) > 262144:
+            raise ValueError('Invalid local override size')
+        overrides[sid] = data
+    return overrides
+
+
 def plan(root, project, fetch=download, validate_js=True):
     current = json.loads((root / 'index.json').read_text())
     previous = json.loads((root / MANIFEST).read_text()) if (root / MANIFEST).exists() else {'entries': {}, 'files': []}
@@ -158,6 +181,16 @@ def plan(root, project, fetch=download, validate_js=True):
             remaps.setdefault(path, {})[str(local_id)] = source['id']
     for path, mapping in remaps.items():
         assets[path] += b'\n;\n' + source_identity_bridge(mapping)
+    # Repository-local additive patches survive future upstream synchronizations.
+    overrides = local_overrides(root)
+    applied = set()
+    for source in upstream:
+        sid = str(source['id'])
+        path = asset_path(source['sourceCodeUrl'])
+        patch = overrides.get(sid)
+        if patch is not None and (path, patch) not in applied:
+            assets[path] += b'\n;\n' + patch
+            applied.add((path, patch))
     for source in upstream:
         sid = str(source['id'])
         local_id = identities[sid]
@@ -165,6 +198,10 @@ def plan(root, project, fetch=download, validate_js=True):
         content_hash = digest(encoded(source) + assets[path])
         old = history.get(str(local_id))
         effective = effective_version(source, old, content_hash)
+        if not old and sid in overrides:
+            parts = list(version_key(effective))
+            parts[-1] += 1
+            effective = '.'.join(map(str, parts))
         version_key(effective)
         row = dict(source)
         row.update(id=local_id, sourceCodeUrl=raw_url(project, path), version=effective,
@@ -256,3 +293,4 @@ if __name__ == '__main__':
         # Logs are public. Never print remote responses, file contents or secrets.
         print('Sync failed. No update was pushed. Review inputs and credentials privately.', file=sys.stderr)
         sys.exit(1)
+
